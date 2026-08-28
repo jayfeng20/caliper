@@ -32,3 +32,8 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      - name: The shipped example must satisfy the contract
+        run: cargo run -q -p caliper -- validate examples/report.json
+
+      - name: The JSON Schema must be emittable
+        run: cargo run -q -p caliper -- schema > /dev/null
