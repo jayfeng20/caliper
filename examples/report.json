@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "pr": {
+    "number": 1842,
+    "title": "Spill the feature-join shuffle to disk above a threshold",
+    "url": "https://github.com/acme/featurestore/pull/1842",
+    "author": "rkumar",
+    "base_ref": "main",
+    "head_ref": "feat/shuffle-spill",
+    "head_sha": "9f3c1ad4e2b7c0518a6d",
+    "state": "OPEN",
+    "draft": false,
+    "additions": 431,
+    "deletions": 96,
+    "changed_files": 11,
+    "ci": "failing"
+  },
+  "explainer": {
+    "summary": "The feature-join stage holds every partition's rows in memory before emitting, so wide joins on the clickstream dataset OOM the executor at around 40M rows. This PR adds a spill path: once a partition's accumulated batch exceeds `spill_threshold_bytes`, the buffer is written to a temp Arrow IPC file and the partition is finished by streaming those files back in order.",
+    "design_notes": "Two designs were on the table. The rejected one pushed the spill decision down into the Arrow writer, which would have kept the join operator ignorant of memory but made the threshold impossible to tune per stage. The chosen design keeps the decision in the operator and threads a `SpillManager` through, which costs an extra constructor argument at 6 call sites but leaves the threshold configurable and the spill files attributable to a stage in metrics.",
+    "files": [
+      { "path": "src/join/spill.rs", "role": "New. SpillManager: temp-file lifecycle, threshold accounting, ordered readback." },
+      { "path": "src/join/operator.rs", "role": "The actual behaviour change — buffer accounting and the branch into spill." },
+      { "path": "src/config.rs", "role": "Adds spill_threshold_bytes, default 512MiB." },
+      { "path": "src/metrics.rs", "role": "Two new counters: spill_files_written, spill_bytes_written." }
+    ]
+  },
+  "findings": [
+    {
+      "id": "bug-1",
+      "severity": "CRITICAL",
+      "category": "DATA_CORRECTNESS",
+      "confidence": 91,
+      "path": "src/join/spill.rs",
+      "line": 142,
+      "end_line": 158,
+      "claim": "The spill buffer is reused across partitions without being cleared.",
+      "consequence": "fill_from() writes into buf starting at index 0 but truncates to the new batch length only on the success path. When partition N+1 produces fewer rows than N, the readback sees N's trailing rows appended to N+1's data, so the join silently emits duplicated feature rows. This is a wrong-answer bug with no error surfaced.",
+      "suggestion": "Call buf.clear() at the top of fill_from rather than truncating at the end.",
+      "agent": "pr-bug-hunter",
+      "corroborated_by": ["pr-blast-radius"]
+    },
+    {
+      "id": "bug-2",
+      "severity": "BUG",
+      "category": "RESOURCE",
+      "confidence": 84,
+      "path": "src/join/spill.rs",
+      "line": 210,
+      "claim": "Temp spill files leak when readback returns an error.",
+      "consequence": "The unlink happens at the end of drain(), which is skipped by the `?` on the IPC read at line 214. A single corrupt spill file leaves every subsequent file for that stage on disk until the process exits, and long-running executors will fill the scratch volume.",
+      "suggestion": "Hold the temp paths in a guard type whose Drop unlinks, so the error path cannot skip it.",
+      "agent": "pr-bug-hunter"
+    },
+    {
+      "id": "blast-1",
+      "severity": "BUG",
+      "category": "SCHEMA_COMPAT",
+      "confidence": 72,
+      "path": "src/config.rs",
+      "line": 88,
+      "claim": "spill_threshold_bytes has no deserialization default, so existing config files fail to load.",
+      "consequence": "JoinConfig derives Deserialize without #[serde(default)] on the new field. Every deployed config.yaml predates this field, so the next rollout fails at startup with a missing-field error rather than falling back to 512MiB. The default constant exists but is only used by Default::default(), which serde does not consult here.",
+      "suggestion": "Add #[serde(default = \"default_spill_threshold\")].",
+      "agent": "pr-blast-radius",
+      "corroborated_by": ["pr-bug-hunter"]
+    },
+    {
+      "id": "perf-1",
+      "severity": "PERFORMANCE",
+      "category": "PERF_REGRESSION",
+      "confidence": 77,
+      "path": "src/join/operator.rs",
+      "line": 301,
+      "claim": "Buffer size is recomputed by walking every row on each append.",
+      "consequence": "accumulated_bytes() sums row.byte_len() over the whole buffer and is called once per appended row, making the threshold check O(n^2) per partition. At the 40M-row scale this PR exists to support, that dominates the join itself.",
+      "suggestion": "Maintain a running total incremented on append.",
+      "agent": "pr-bug-hunter"
+    },
+    {
+      "id": "test-1",
+      "severity": "TESTING",
+      "category": "DATA_CORRECTNESS",
+      "confidence": 88,
+      "path": "src/join/spill.rs",
+      "line": 402,
+      "claim": "No test exercises more than one spill file per partition.",
+      "consequence": "test_spill_roundtrip uses a 1KiB threshold with 900 bytes of data, so the spill path is entered but the multi-file ordered readback — the part most likely to be wrong, and where bug-1 lives — is never executed. The test passes with the reuse bug present.",
+      "agent": "pr-blast-radius",
+      "corroborated_by": ["pr-code-quality"]
+    },
+    {
+      "id": "obs-1",
+      "severity": "STYLE",
+      "category": "OBSERVABILITY",
+      "confidence": 65,
+      "path": "src/metrics.rs",
+      "line": 44,
+      "claim": "Spill counters are not labelled by stage.",
+      "consequence": "Both counters are global, so an operator seeing spill_bytes_written climb cannot tell which join stage is responsible — which is the first question anyone asks. Every other counter in this file carries a stage label.",
+      "suggestion": "Add the stage label the way join_rows_emitted does at line 31.",
+      "agent": "pr-code-quality"
+    },
+    {
+      "id": "q-1",
+      "severity": "QUESTION",
+      "confidence": 55,
+      "path": "src/join/operator.rs",
+      "line": 274,
+      "claim": "Unclear whether spilling is meant to be disabled by a zero threshold.",
+      "consequence": "A threshold of 0 makes every append exceed it, so the operator spills each row to its own file. If 0 is intended to mean 'never spill', this is inverted; if it is meant to be rejected, config validation does not reject it.",
+      "agent": "pr-code-quality"
+    },
+    {
+      "id": "nice-1",
+      "severity": "NICE",
+      "confidence": 90,
+      "path": "src/join/spill.rs",
+      "line": 63,
+      "claim": "The SpillManager ownership model is genuinely clean.",
+      "consequence": "Making the manager own the temp directory and hand out only opaque handles means no caller can construct a path, which rules out an entire class of path-confusion bugs. Worth saying out loud so it survives the next refactor.",
+      "agent": "pr-code-quality"
+    }
+  ],
+  "action_list": [
+    { "kind": "blocker", "text": "Confirm bug-1 by writing a two-partition test where the second partition is smaller, then require the fix. This is a silent wrong-answer path." },
+    { "kind": "blocker", "text": "Require the serde default in config.rs (blast-1) — without it this PR breaks the rollout on first deploy, independent of the join logic." },
+    { "kind": "verify", "text": "Check whether the failing CI job is the spill roundtrip test or something unrelated before asking the author about anything else." },
+    { "kind": "push-back", "text": "The O(n^2) accounting (perf-1) undercuts the PR's own goal; ask for the running total rather than filing it as a follow-up." },
+    { "kind": "ask", "text": "Ask what a zero spill_threshold_bytes is supposed to mean (q-1) — the answer decides whether config validation needs a change too." }
+  ],
+  "verdict": "Request changes. The design is sound and worth landing, but two of the findings are correctness issues that the current tests cannot catch, and one breaks config loading on deploy.",
+  "skipped_agents": []
+}

@@ -4,3 +4,5 @@
 //! report as JSON, caliper owns every presentation decision, and the reviewer's
 //! triage is written back into the *same* document so the round trip is idempotent
 //! and diffable.
+
+pub mod report;
