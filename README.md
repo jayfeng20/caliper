@@ -112,8 +112,33 @@ renames ship as serde aliases. Parsing is permissive; `caliper validate` is wher
 strictness lives. Those guarantees are pinned by the *schema evolution* tests in
 `crates/caliper/tests/report.rs`.
 
-Full spec: [`docs/agent-contract.md`](docs/agent-contract.md). Drop-in Claude Code
-skill: [`skills/caliper.md`](skills/caliper.md).
+Full spec: [`docs/agent-contract.md`](docs/agent-contract.md).
+
+## The review pipeline
+
+The agents that produce these reports live in this repo, so it is the whole pipeline
+rather than half of one:
+
+```
+.claude/
+  commands/ipr.md     the /ipr review command — resolves the PR, fans out, synthesizes
+  commands/caliper.md validate, render, and answer follow-up questions
+  agents/pr-explainer.md          what is this and why?
+  agents/pr-bug-hunter.md         is it correct?
+  agents/pr-code-quality.md       is it well written?
+  agents/pr-blast-radius.md       what else does it touch, and is that proven safe?
+  agents/pr-review-synthesizer.md what should the reviewer actually do?
+```
+
+Because they sit in `.claude/`, they are live whenever you work inside this repo — so
+caliper reviews its own pull requests.
+
+To use them in your other repos, symlink rather than copy, so this repo stays the
+source of truth:
+
+```bash
+./scripts/install-claude-code.sh
+```
 
 ## Roadmap
 
