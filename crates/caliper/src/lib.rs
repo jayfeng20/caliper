@@ -5,4 +5,5 @@
 //! triage is written back into the *same* document so the round trip is idempotent
 //! and diffable.
 
+pub mod render;
 pub mod report;
