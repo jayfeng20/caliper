@@ -1,0 +1,12 @@
+[package]
+name = "caliper"
+description = "Structured terminal rendering and triage for agent-generated PR review findings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
